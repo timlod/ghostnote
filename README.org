@@ -1,0 +1,22 @@
+#+TITLE: ghostnote
+#+AUTHOR: Tim Loderhose
+#+EMAIL: tim@loderhose.com
+#+DATE: Wednesday, 11 September 2024
+#+STARTUP: showall
+#+PROPERTY: header-args :exports both :session of :kernel gn :cache no
+
+Robust multi-channel onset detection for percussive audio.
+
+ghostnote makes sense of relationships between recordings of the same audio
+across multiple sensors/microphones, and uses this to identify the location of
+the origin of the sound - in the example of a drumkit, we use a combination of
+overhead and close microphones to locate where the drum is hit, in real-time.
+
+This information can be used to map locations to actions - effectively
+creating, in the drumset example, an electric kit alongside the acoustic drums.
+Or controlling an FX rig, lightning, or whatever you want!
+
+Check [[file:notebooks/intro.org][intro.org]] for a detailed introduction into the topic and links to what is
+currently being worked on.
+
+ghostnote is in active development and not yet easily usable.

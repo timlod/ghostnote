@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghostnote"
+description = "Fingerprinting/classification of percussive onsets"
+version = "0.0"
+requires-python = ">=3.10"
+keywords = ["audio", "onset"]
+authors = [
+{email = "tim@loderhose.com"},
+{name = "Tim Loderhose"}
+]
+classifiers = [
+"Programming Language :: Python :: 3",
+]
+dependencies = [
+# For fast continuous wavelet transforms
+# "fctw",
+# For MIR
+"librosa",
+# For plotting
+"matplotlib",
+"numpy",
+# For dataframes
+"pandas",
+# Install manually!
+# "torch",
+# For modelling
+"scikit_learn",
+"scipy",
+# For audio file loading
+"sounddevice",
+"soundfile"
+]
+
+[project.optional-dependencies]
+devtools = ["black", "black-macchiato", "mypy", "flake8", "isort", "python-lsp-server"]
+dev = ["jupyter"]
+
+[tool.setuptools]
+packages = ["ghostnote"]
+
+[tool.mypy]
+python_version = "3.10"
+
+[tool.black]
+preview = true
+# https://black.readthedocs.io/en/stable/the_black_code_style/future_style.html
+enable-unstable-feature = ["string_processing"]
