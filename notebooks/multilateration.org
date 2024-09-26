@@ -1,0 +1,441 @@
+#+TITLE: Multilateration of drum hits
+#+AUTHOR: Tim Loderhose
+#+EMAIL: tim@loderhose.com
+#+DATE: Wednesday, 11 September 2024
+#+STARTUP: showall
+#+PROPERTY: header-args :exports both :session multilat :kernel gn :cache no
+#+OPTIONS: tex t
+:PROPERTIES:
+OPTIONS: ^:nil
+#+LATEX_COMPILER: xelatex
+#+LATEX_CLASS: article
+#+LATEX_CLASS_OPTIONS: [logo, color, author]
+#+LATEX_HEADER: \insertauthor
+#+LATEX_HEADER: \usepackage{minted}
+#+LATEX_HEADER: \usepackage[left=0.75in,top=0.6in,right=0.75in,bottom=0.6in]{geometry}
+:END:
+
+* Imports and Environment Variables
+:PROPERTIES:
+:visibility: folded
+:END:
+
+#+name: imports
+#+begin_src python
+import matplotlib.pyplot as plt
+import numpy as np
+from onset_fingerprinting import plots
+#+end_src
+
+#+name: env
+#+begin_src python
+
+#+end_src
+
+* Introduction
+
+The classical example of multilateration is trilateration (using 3 known
+locations) of locations using GPS signals. In this article, I will explain
+trilateration of drum hits, specifically, using 3 microphones to determine the
+exact location where a drumstick makes contact with the drumhead.
+
+We will go into both calibration of microphone positions and real-time
+processing of microphone audio to arrive at hit locations, with example code in
+Python.
+
+* Setup
+
+We'll be assuming a typical setup of a drumkit for live or recording/tracking
+purposes:
+- standard kit (kick, snare, toms, cymbals)
+- 2 overhead microphones around 1m away from the center of the snare drum
+- close microphones on other drums
+
+We'll be using the snare drum as the example with the combination of
+overheads + close mic as the three sensors used in trilateration, but the
+discussed technique could be used for any drum.
+
+* Trilateration using 3 sensors
+
+Trilateration works by leveraging the differences of the Times of Arrival (ToA)
+of signals at three different sensors. In an idealized 2D world/plane, we can
+imagine that a signal can be generated at each position on this plane. This
+signal will then travel to each of the sensors, which, at arrival, record the
+ToA. The Time Difference of Arrival (TDoA) between sensors works out such that
+for each position on this plane, there is a unique combination of TDoAs.
+Therefore, if we know the exact speed the signal moved, the exact locations of
+the sensors, and the exact times at which they received the signal, we can
+determine exactly where the signal originated.
+
+Let's make this concrete with the snare drum as an example!
+
+** Trilateration in 2D using membrane sensors
+
+As an intermediate, instead of microphones in 3D space, let's imagine we
+instead put 3 membrane sensors on our drum. These sensors (like the Sensory
+Percussion sensors) record the movement of the drumhead (which vibrates 'up and
+down') at a specific point.
+
+Let's define two coordinate systems, in each of which the center of the drum is
+(0, 0). One of them is cartesian, with $x,y$ coordinates in centimeters. The
+other is polar, with radius $r$ defined from 0 (origin) to 1 (edge) and angle
+$\phi$ in degrees. We can easily convert between them using the functions in
+[[file:../ghostnote/utils.py][utils.py]].
+
+We'll use the polar coordinate system to define some sensor locations - let's
+imagine the sensors read close to the edge of the drumhead and are equidistant
+from each other (120 degrees apart):
+#+begin_src python
+# 14 inch snare drum in centimeters
+diameter = 14 * 2.54
+radius = diameter / 2
+# 0 angle == 360 - at the origin
+sensor_locs = ((0.9, 0), (0.9, 120), (0.9, 240))
+# The positions in the cartesian coordinate system
+sensor_locs_cart = np.array([polar_to_cartesian(*x) for x in sensor_locs]) * radius
+sensor_locs_cart
+#+end_src
+
+#+RESULTS:
+: array([[ 16.002     ,   0.        ],
+:        [ -8.001     ,  13.85813851],
+:        [ -8.001     , -13.85813851]])
+
+#+begin_src python
+import matplotlib.patches as patches
+ax = polar_circle(
+    sensor_locs,
+    title="Snare drum with sensors",    
+    labels=["Sensor 1", "Sensor 2", "Sensor 3"]
+)
+ax.scatter((0, 0), (0, 0), 1, c="black")
+plt.xlabel("Cartesian x/y")
+plt.xticks([-1, 0, 1], [-17.78, 0, 17.78])
+plt.ylabel("Polar radius")
+plt.yticks([-1, 0, 1], [-1, 0, 1]);
+arrow_style = patches.ArrowStyle(
+    "Simple", head_length=4, head_width=4, tail_width=0.5
+)
+phi = np.pi / 2
+arrow = patches.FancyArrowPatch(
+    (0.2, 0),
+    (0.2 * np.cos(phi), 0.2 * np.sin(phi)),
+    connectionstyle="arc3,rad=.5",
+    arrowstyle=arrow_style,
+    color="blue",
+)
+ax.add_patch(arrow)
+plt.annotate(
+    f"phi",
+    (0.08, 0),
+    color="blue",
+    textcoords="offset points",
+    xytext=(0, 10),
+    ha="center",
+    fontsize=8,    
+);
+#+end_src
+
+#+RESULTS:
+[[./.ob-jupyter/9c33bd2bf578ab03f88e68588d06e067afbc6fab.png]]
+
+Now, for a strike in the center of the drum, it should be obvious that the
+signal should arrive at each sensor at the same time. But what about other
+locations? Imagine moving on the x-axis (or $\phi=0$ with increasing $r$)
+towards sensor 1 - the signal will arrive there first, but still take the same
+time to reach the other two sensors. It turns out we can visualize the TDoA of
+each sensor pair for each location on the drumhead. Let's also start moving
+this problem closer to the realm of digital audio: We'll assume data is
+recorded at a sampling rate of 48kHz, and also that sound moves through the
+drumhead at a speed of 100m/s (which is realistic for that medium). We can now
+define the TDoA in terms of sample lags - the amount of samples which a signal
+arrives at earlier/later at a given sensor.
+
+The following then represents what we can call a "lag map" between sensors 1
+and 2 - we can see a parabolic pattern with values at/close to 0 when the
+signal travels the same distance to both sensors, and the largest values (100
+samples respectively) present at the sensor locations directly.
+#+begin_src python :file ./figures/lagmaps.png
+fig = plt.figure(figsize=(12, 5))
+axs = fig.subplots(1, 2)
+plot_lags_2D(
+    sensor_locs[0],
+    sensor_locs[1],
+    sr=48000,
+    c=100.0,
+    scale=10,
+    labels=["Sensor 1", "Sensor 2"],
+    ax=axs[0],
+)
+plot_lags_2D(
+    sensor_locs[0],
+    sensor_locs[2],
+    sr=48000,
+    c=100.0,
+    scale=10,
+    labels=["Sensor 1", "Sensor 3"],
+    ax=axs[1]
+)
+for im in ax.get_images():
+    im.set_extent([-r, r, -r, r])
+#+end_src
+
+#+RESULTS:
+[[./figures/lagmaps.png]]
+
+
+As our sensor placements are regular, lag maps defined between other
+combinations of sensors will look similar to these, just rotated/flipped. Think
+briefly about why that would be!
+
+Here we can see what this looks like in action - for a number of drum
+hits/locations, we can see both the parabola corresponding to a recorded lag
+(in number of samples) for both sensor combinations, and that where the
+parabolas intersect is indeed the point corresponding to that drum hit.
+#+begin_src python
+from matplotlib.animation import FuncAnimation
+from matplotlib.lines import Line2D
+
+d = diameter
+r = d / 2
+c = 100.0
+scale = 1
+
+mic_a = sensor_locs_cart[0]
+mic_b = sensor_locs_cart[1]
+mic_c = sensor_locs_cart[2]
+
+# Grid over the drumhead to compute mask for contours
+num_points = 100
+x = np.linspace(-r, r, num=num_points)
+y = np.linspace(-r, r, num=num_points)
+X, Y = np.meshgrid(x, y)
+mask = X**2 + Y**2 <= r**2
+
+# Path of drum hits to animate (a circle inside the drum)
+theta_vals = np.linspace(0, 2 * np.pi, num=50)
+x0_vals = 0.5 * r * np.cos(theta_vals)
+y0_vals = 0.5 * r * np.sin(theta_vals)
+
+fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+ax1, ax2, ax3 = axs
+
+
+def setup_ax(ax):
+    for im in ax.get_images():
+        im.set_extent([-r, r, -r, r])
+    circle = plt.Circle((0, 0), r, edgecolor="black", facecolor="none")
+    ax.add_artist(circle)
+    ax.set_xlim(-r, r)
+    ax.set_ylim(-r, r)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def plot_sensors(ax, mics, labels):
+    for mic, label in zip(mics, labels):
+        ax.scatter(mic[0], mic[1], c="black", marker="o", label=label)
+
+
+plot_lags_2D(
+    sensor_locs[0],
+    sensor_locs[1],
+    sr=48000,
+    c=100.0,
+    scale=10,
+    labels=["Sensor 1", "Sensor 2"],
+    ax=axs[0],
+    add_colorbar=False,
+    add_legend=False,
+)
+plot_lags_2D(
+    sensor_locs[0],
+    sensor_locs[2],
+    sr=48000,
+    c=100.0,
+    scale=10,
+    labels=["Sensor 1", "Sensor 3"],
+    ax=axs[1],
+    add_colorbar=False,
+    add_legend=False,
+)
+
+plot_sensors(ax1, [mic_a, mic_b], ["Sensor 1", "Sensor 2"])
+plot_sensors(ax2, [mic_a, mic_c], ["Sensor 1", "Sensor 3"])
+plot_sensors(
+    axs[2], [mic_a, mic_b, mic_c], ["Sensor 1", "Sensor 2", "Sensor 3"]
+)
+for ax in axs:
+    setup_ax(ax)
+
+# Get the image objects from the axes
+im1 = axs[0].images[0]
+im2 = axs[1].images[0]
+# Add the colorbar at the bottom of the two lag maps
+cbar = fig.colorbar(
+    im1, ax=axs[0:2], orientation="horizontal", fraction=0.05, pad=0.1
+)
+cbar.set_label("Samples difference")
+
+# Create custom legend handles
+sensor_handle = Line2D(
+    [],
+    [],
+    marker="o",
+    color="black",
+    linestyle="None",
+    markersize=8,
+    label="Sensors",
+)
+drumhit_handle = Line2D(
+    [],
+    [],
+    marker="o",
+    color="red",
+    linestyle="None",
+    markersize=8,
+    label="Drum Hit",
+)
+contour_red_handle = Line2D(
+    [],
+    [],
+    color="darkred",
+    linestyle="dashed",
+    label="Lag contour sensors 1 and 2",
+)
+contour_green_handle = Line2D(
+    [],
+    [],
+    color="darkgreen",
+    linestyle="dashed",
+    label="Lag contour sensors 1 and 3",
+)
+
+fig.legend(
+    handles=[
+        sensor_handle,
+        drumhit_handle,
+        contour_red_handle,
+        contour_green_handle,
+    ],
+    loc="upper center",
+    ncol=4,
+    bbox_to_anchor=(0.5, 0.95),
+)
+# Adjust layout to accommodate legend and colorbar
+plt.subplots_adjust(top=0.9, bottom=0.15, wspace=0.1)
+
+artists = []
+def update(frame):
+    global artists
+    x0, y0 = x0_vals[frame], y0_vals[frame]
+
+    # Clear previous contours
+    for p in artists:
+        p.remove()
+    artists.clear()
+
+    # Plot the current drum hit point
+    for ax in axs:
+        artists.append(ax.plot(x0, y0, "ro")[0])
+
+    # Distances from the hit point to sensors
+    distance_a = np.hypot(x0 - mic_a[0], y0 - mic_a[1])
+    distance_b = np.hypot(x0 - mic_b[0], y0 - mic_b[1])
+    distance_c = np.hypot(x0 - mic_c[0], y0 - mic_c[1])
+
+    # Difference in distances
+    delta_d_ab = distance_a - distance_b
+    delta_d_ac = distance_a - distance_c
+
+    # Distance grids
+    distance_grid_a = np.hypot(X - mic_a[0], Y - mic_a[1])
+    distance_grid_b = np.hypot(X - mic_b[0], Y - mic_b[1])
+    distance_grid_c = np.hypot(X - mic_c[0], Y - mic_c[1])
+
+    difference_grid_ab = distance_grid_a - distance_grid_b
+    difference_grid_ac = distance_grid_a - distance_grid_c
+    difference_grid_ab[~mask] = np.nan
+    difference_grid_ac[~mask] = np.nan
+
+    # Plot hyperbolas (contours where the difference equals delta_d)
+    a = ax1.contour(
+        X,
+        Y,
+        difference_grid_ab,
+        levels=[delta_d_ab],
+        colors="darkred",
+        linestyles="dashed",
+    )
+    b = ax2.contour(
+        X,
+        Y,
+        difference_grid_ac,
+        levels=[delta_d_ac],
+        colors="darkgreen",
+        linestyles="dashed",
+    )
+    c = ax3.contour(
+        X,
+        Y,
+        difference_grid_ab,
+        levels=[delta_d_ab],
+        colors="darkred",
+        linestyles="dashed",
+    )
+    d = ax3.contour(
+        X,
+        Y,
+        difference_grid_ac,
+        levels=[delta_d_ac],
+        colors="darkgreen",
+        linestyles="dashed",
+    )
+    artists.extend([a, b, c, d])    
+    # Add text annotations to show the current lag values
+    lag_ab = delta_d_ab * 100000 / 48000
+    lag_ac = delta_d_ac * 100000 / 48000
+    ax1_text = ax1.text(
+        -0.0,
+        0.95,
+        f"Lag: {lag_ab:.0f}",
+        transform=ax1.transAxes,
+        verticalalignment="top",
+    )
+    ax2_text = ax2.text(
+        -0.0,
+        0.95,
+        f"Lag: {lag_ac:.0f}",
+        transform=ax2.transAxes,
+        verticalalignment="top",
+    )
+    artists.extend([ax1_text, ax2_text])
+
+
+ani = FuncAnimation(fig, update, frames=len(x0_vals), blit=False)
+ani.save("figures/trilateration.gif", writer="pillow", fps=5, dpi=100)
+#+end_src
+
+#+RESULTS:
+[[file:./figures/trilateration.gif]]
+
+* Calibration
+
+
+* Caveats
+
+** The rim
+This technique will not work on rim hits, as the [[https://en.wikipedia.org/wiki/Speed_of_sound#Three-dimensional_solids][speed of sound through steel]]
+is about 20x faster than the speed of sound through air - in practice, this
+means that the sound will essentially always arrive at the microphone from the
+part of the rim closest to it first. Imagine hitting the rim the farthest away
+from the microphone - the transient from that hit will travel through air from
+that location of the speed of sound. But at the same time, it will travel
+towards the microphone through the rim itself, and from there on disperse the
+sound into the air, meaning that the sound from the rim opposite where we hit
+will travel to the microphone faster than from the location we actually hit.
+There might be other techniques we could apply to still learn locations from
+such audio, but multilateration in the same manner as hits on the head will not
+work.
+
+Rimshots are tricky in the same manner, as they hit both rim and the drumhead.
